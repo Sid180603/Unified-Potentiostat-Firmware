@@ -2,7 +2,15 @@
 
 Rewritten firmware + web UI for the XIAO-based potentiostat (SAMD21 + ADS1115 + LM324 TIA).
 
+Repository: https://github.com/Sid180603/Unified-Potentiostat-Firmware
+
 ## Quick Start
+
+### Clone
+```bash
+git clone https://github.com/Sid180603/Unified-Potentiostat-Firmware.git
+cd Unified-Potentiostat-Firmware
+```
 
 ### Firmware (Windows terminal)
 ```bash
@@ -30,7 +38,7 @@ make ui-dev
 ## Project Structure
 
 ```
-unified/
+.
 ├── firmware/          PlatformIO project (C++)
 │   ├── src/main.cpp       Hardware layer (Arduino + ADS1115)
 │   ├── include/config.h   Constants and pin definitions

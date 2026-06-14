@@ -4,6 +4,9 @@ Mock Potentiostat — Simulates firmware serial protocol on a virtual COM port.
 Responds to:
   C [params]  → Butler-Volmer CV (duck-curve shaped)
   D [params]  → 4 Gaussian DPV peaks (Cd, Pb, Cu, Hg)
+  L [step]    → DAC linearity sweep ('dac,volts')
+  T [params]  → step response ('elapsed_us,current_uA')
+  Q [dac]     → channel query: all 8 ADS1115 channels at one DAC value
   !           → Abort current scan
   Z           → Report zero offset
   I           → Firmware identity string
@@ -60,6 +63,8 @@ class MockPotentiostat:
                     self.simulate_linearity(line)
                 elif line[0] in ('T', 't'):
                     self.simulate_step(line)
+                elif line[0] in ('Q', 'q'):
+                    self.simulate_query(line)
                 else:
                     self.ser.write(f"E: Unknown command '{line[0]}'\n".encode())
 
@@ -257,6 +262,54 @@ class MockPotentiostat:
 
         self.ser.write(b"T#\n")
         self.log(f"Step response complete (aborted={self.abort})")
+
+    def simulate_query(self, cmd):
+        """Simulate the Q channel-query diagnostic.
+
+        Sets the DAC to one value and reports all 8 ADS1115 channels
+        (4 single-ended AIN0-3 + 4 differential pairs), matching the firmware's
+        runChannelQuery output exactly. AIN1 is modelled as the channel carrying
+        Vin (tracks the DAC), so running Q twice at separated DAC values lets the
+        'which channel changed' diagnostic be exercised. Single-ended channels
+        clip negatives to 0; the differential pairs stay bipolar.
+        """
+        dac = 512
+        args = cmd[1:].strip()
+        if args:
+            try:
+                dac = max(0, min(1023, int(float(args.split(',')[0]))))
+            except ValueError:
+                dac = 512
+
+        vin_theoretical = (dac - 512) / 312.0
+        ain_vin = max(0.0, vin_theoretical)   # single-ended clips negatives to 0
+
+        # Header line (START marker — note: 'Q dac=...', NOT 'Q*')
+        self.ser.write(f"Q dac={dac} Vin_theoretical={vin_theoretical:.4f}\n".encode())
+        self.log(f"Channel query: dac={dac}")
+
+        # Single-ended channels AIN0-3 (0 to +4.096V)
+        ain = {
+            0: 1.65 + 0.001 * (hash(f"q0_{dac}") % 100 - 50) / 50.0,   # TIA output (idle ~mid-rail)
+            1: ain_vin + 0.001 * (hash(f"q1_{dac}") % 100 - 50) / 50.0,  # Vin readback (tracks DAC)
+            2: abs(0.001 * (hash(f"q2_{dac}") % 100 - 50) / 50.0),     # unused
+            3: 1.65 + 0.001 * (hash(f"q3_{dac}") % 100 - 50) / 50.0,   # reference rail
+        }
+        for ch in range(4):
+            self.ser.write(f"AIN{ch}={ain[ch]:.5f}\n".encode())
+
+        # Differential pairs (bipolar +/-4.096V — can report negative Vin)
+        diff = {
+            '0_1': 1.65 - vin_theoretical + 0.001 * (hash(f"qd01_{dac}") % 100 - 50) / 50.0,
+            '0_3': 0.001 * (hash(f"qd03_{dac}") % 100 - 50) / 50.0,
+            '1_3': vin_theoretical - 1.65 + 0.001 * (hash(f"qd13_{dac}") % 100 - 50) / 50.0,
+            '2_3': -1.65 + 0.001 * (hash(f"qd23_{dac}") % 100 - 50) / 50.0,
+        }
+        for pair in ('0_1', '0_3', '1_3', '2_3'):
+            self.ser.write(f"DIFF_{pair}={diff[pair]:.5f}\n".encode())
+
+        self.ser.write(b"Q#\n")
+        self.log("Channel query complete")
 
 
 if __name__ == '__main__':

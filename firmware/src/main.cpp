@@ -152,13 +152,14 @@ void runStep(int dacBefore, int dacAfter, int nSamples) {
 // Run twice at separated DAC values (e.g. "Q 900" then "Q 100") and look for
 // which channel CHANGES between them — that channel carries Vin. Differential
 // pairs reveal Vin even when single-ended clips a negative swing to 0.
-// Output: "Q dac=... Vin_theoretical=..." ... per-channel lines ... "Q#".
+// Output: "Q*" ... "Q dac=... Vin_theoretical=..." ... per-channel lines ... "Q#".
 // Restores AIN0 continuous mode on exit so normal CV/DPV keeps working.
 void runChannelQuery(int dacVal) {
     setDAC(dacVal);
     delay(10);  // generous settle for DAC + level shifter
     const float LSB = 4.096f / 32768.0f;
 
+    Serial.println("Q*");
     Serial.print("Q dac=");
     Serial.print(dacVal);
     Serial.print(" Vin_theoretical=");

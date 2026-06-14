@@ -60,12 +60,29 @@ make ui-dev
 
 ## Serial Protocol
 
-| Command | Description |
-|---------|-------------|
-| `C [Vstart,Vstop,cycles,rate]` | Cyclic Voltammetry |
-| `D [Vstart,Vstop,Veq,teq,stepE,pulseAmp,period,width]` | Differential Pulse Voltammetry |
-| `!` | Abort current scan |
-| `Z` | Auto-zero (measure TIA offset) |
-| `I` | Firmware identity |
+| Command | Description | Stream markers / output |
+| --- | --- | --- |
+| `C [Vstart,Vstop,cycles,rate]` | Cyclic Voltammetry | `*` … `voltage,current,re` … `#` |
+| `D [Vstart,Vstop,Veq,teq,stepE,pulseAmp,period,width]` | Differential Pulse Voltammetry | `*` … `voltage,current,re` … `$` |
+| `L [stepSize]` | DAC linearity sweep (diagnostic) | `L*` … `dac,volts` … `L#` |
+| `T [dacBefore,dacAfter,nSamples]` | Step response (diagnostic) | `T*` … `elapsed_us,current_uA` … `T#` |
+| `Q [dac]` | Channel-query: all ADS1115 channels at one DAC (diagnostic) | `Q dac=… Vin_theoretical=…` … `AINn=…` / `DIFF_x_y=…` … `Q#` |
+| `!` | Abort current scan | — |
+| `Z` | Auto-zero (measure TIA offset) | `Z: offset=…mV` |
+| `I` | Firmware identity | identity string |
 
-Data stream: `*\n` start marker, CSV `voltage,current\n` lines, `#\n` (CV end) or `$\n` (DPV end).
+**Data columns:** CV/DPV stream three columns — `voltage,current,re` — where `re` is the measured
+reference-electrode voltage (3rd column added for RE monitoring). The `L`, `T`, and `Q` diagnostics
+emit their own distinct column shapes (see markers above) and must NOT be parsed as voltammetry.
+
+## Thesis figure numbering (canonical — keep consistent in code, README, and the document)
+
+| Figure | Plot | Source command |
+| --- | --- | --- |
+| **Fig 1** | DAC linearity | `L` |
+| **Fig 2** | RE monitoring (commanded V vs measured RE) | `C`/`D` (RE column) |
+| **Fig 3** | Step response | `T` |
+| **Fig 4** | CV attempt / WE fault diagnosis | `C` |
+
+These are the agreed, single source of truth for figure numbers. If earlier thesis chapters consume
+figure numbers first, renumber **all four together** — never mix two schemes across planning and prose.

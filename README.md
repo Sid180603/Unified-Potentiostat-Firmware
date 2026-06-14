@@ -66,7 +66,7 @@ make ui-dev
 | `D [Vstart,Vstop,Veq,teq,stepE,pulseAmp,period,width]` | Differential Pulse Voltammetry | `*` … `voltage,current,re` … `$` |
 | `L [stepSize]` | DAC linearity sweep (diagnostic) | `L*` … `dac,volts` … `L#` |
 | `T [dacBefore,dacAfter,nSamples]` | Step response (diagnostic) | `T*` … `elapsed_us,current_uA` … `T#` |
-| `Q [dac]` | Channel-query: all ADS1115 channels at one DAC (diagnostic) | `Q dac=… Vin_theoretical=…` … `AINn=…` / `DIFF_x_y=…` … `Q#` |
+| `Q [dac]` | Channel-query: all ADS1115 channels at one DAC (diagnostic) | `Q*` … `Q dac=… Vin_theoretical=…` … `AINn=…` / `DIFF_x_y=…` … `Q#` |
 | `!` | Abort current scan | — |
 | `Z` | Auto-zero (measure TIA offset) | `Z: offset=…mV` |
 | `I` | Firmware identity | identity string |

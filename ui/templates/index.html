@@ -1,13 +1,1343 @@
 <!DOCTYPE html>
 <html lang="en">
+<!--
+  Unified Potentiostat — Phase 8 Browser Frontend
+  Flask + Socket.IO + Plotly.js + Tailwind CSS
+
+  CDN dependencies (pin versions for reproducibility; vendor into static/ for offline lab use):
+    Tailwind CSS play-CDN v3  — https://cdn.tailwindcss.com
+    Plotly.js v2.35.2         — https://cdn.plot.ly/plotly-2.35.2.min.js
+    Socket.IO client v4.7.5   — https://cdn.socket.io/4.7.5/socket.io.min.js
+
+  Always open via http://localhost:5000 (or http://<LAN_IP>:5000 for tablet/phone).
+  NEVER use `flask run` — it does not support WebSocket. Always use `python app.py`.
+-->
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Potentiostat UI</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Potentiostat</title>
+
+  <!-- Tailwind CSS play CDN (v3) — scans classes at runtime, no build step needed -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: {} },
+    };
+  </script>
+
+  <!-- Plotly.js (pinned v2.35.2) -->
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+
+  <!-- Socket.IO client (pinned v4.7.5) -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <!-- Shared pure-JS utilities: peak detection, CSV, species annotation, presets -->
+  <script src="/static/potentiostat-core.js"></script>
+
+  <style>
+    /* Force chart containers to fill flex parent */
+    #plot, #diag-plot { width: 100%; }
+    .chart-container { min-height: 0; }
+
+    /* Toast slide-in */
+    #toast {
+      transition: opacity 0.3s, transform 0.3s;
+      opacity: 0; transform: translateY(-8px); pointer-events: none;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+
+    /* Sidebar tab active indicator */
+    .tab-btn.active {
+      border-bottom: 2px solid #3b82f6;
+      color: #3b82f6;
+    }
+    .dark .tab-btn.active { color: #60a5fa; border-bottom-color: #60a5fa; }
+
+    /* Scrollbar for sidebar */
+    #sidebar::-webkit-scrollbar { width: 4px; }
+    #sidebar::-webkit-scrollbar-track { background: transparent; }
+    #sidebar::-webkit-scrollbar-thumb { background: #6b7280; border-radius: 2px; }
+
+    /* Peak chip */
+    .peak-chip {
+      display: inline-block; border-radius: 4px;
+      padding: 1px 6px; font-size: 0.7rem; font-weight: 600;
+      margin: 1px 2px;
+    }
+
+    /* Status dot */
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+    }
+    .dot-disconnected { background: #6b7280; }
+    .dot-connected    { background: #10b981; }
+    .dot-scanning     { background: #f59e0b; animation: pulse 1s infinite; }
+    .dot-complete     { background: #3b82f6; }
+    .dot-error        { background: #ef4444; }
+
+    @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
+  </style>
 </head>
-<body>
-    <h1>Potentiostat UI — Placeholder</h1>
-    <p>Full implementation in Phase 8 (Flask+SocketIO frontend).</p>
-    <p>For Web Serial standalone, see <a href="/static/webserial.html">webserial.html</a>.</p>
+
+<body class="bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-100 flex flex-col h-screen overflow-hidden select-none">
+
+  <!-- ======================================================================
+       TOAST NOTIFICATION (fixed, top-right)
+       ====================================================================== -->
+  <div id="toast"
+       class="fixed top-4 right-4 z-50 max-w-xs px-4 py-2 rounded shadow-lg text-sm font-medium"
+       role="alert" aria-live="polite">
+  </div>
+
+  <!-- ======================================================================
+       NAVBAR
+       ====================================================================== -->
+  <nav class="flex items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-gray-700
+              bg-white dark:bg-gray-800 flex-shrink-0">
+
+    <!-- Port selector -->
+    <select id="port-select"
+            class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1
+                   bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500 w-36">
+      <option value="">— Select port —</option>
+    </select>
+
+    <!-- Connect / Disconnect button -->
+    <button id="btn-connect"
+            class="text-xs px-3 py-1 rounded font-medium
+                   bg-emerald-600 hover:bg-emerald-700 text-white transition-colors">
+      Connect
+    </button>
+
+    <!-- Spacer + title -->
+    <span class="flex-1 text-center font-semibold tracking-wide text-sm">
+      Potentiostat
+      {% if dev_mode %}
+        <span class="ml-1 text-xs bg-amber-400 text-amber-900 px-1 rounded font-bold">DEV</span>
+      {% endif %}
+    </span>
+
+    <!-- View mode buttons -->
+    <div class="flex gap-1 text-xs">
+      <button id="view-voltammogram" onclick="setViewMode('voltammogram')"
+              class="view-btn px-2 py-1 rounded bg-blue-600 text-white">Voltammogram</button>
+      <button id="view-re_monitor" onclick="setViewMode('re_monitor')"
+              class="view-btn px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600">RE Monitor</button>
+      <button id="view-diagnostics" onclick="setViewMode('diagnostics')"
+              class="view-btn px-2 py-1 rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600">Diagnostics</button>
+    </div>
+
+    <!-- Dark/light theme toggle -->
+    <button id="btn-theme" onclick="toggleTheme()"
+            class="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-gray-700
+                   hover:bg-gray-300 dark:hover:bg-gray-600 ml-1">
+      <span id="theme-label">🌙 Dark</span>
+    </button>
+  </nav>
+
+  <!-- ======================================================================
+       MAIN CONTENT (sidebar + chart area)
+       ====================================================================== -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- ==================================================================
+         SIDEBAR (left panel)
+         ================================================================== -->
+    <aside id="sidebar"
+           class="w-64 flex-shrink-0 border-r border-gray-200 dark:border-gray-700
+                  bg-white dark:bg-gray-800 overflow-y-auto flex flex-col">
+
+      <!-- Status bar -->
+      <div class="flex items-center gap-2 px-3 py-2 border-b border-gray-100 dark:border-gray-700">
+        <span id="status-dot" class="status-dot dot-disconnected"></span>
+        <span id="status-text" class="text-xs font-medium text-gray-600 dark:text-gray-400">Disconnected</span>
+      </div>
+
+      <!-- Point counter + scan info -->
+      <div id="info-bar" class="px-3 py-1 text-xs text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-gray-700 min-h-[24px]"></div>
+
+      <!-- ---- Mode tabs: CV | DPV | Diagnostics ---- -->
+      <div class="flex border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+        <button class="tab-btn active flex-1 text-xs py-2 font-medium" data-tab="cv" onclick="switchTab('cv')">CV</button>
+        <button class="tab-btn flex-1 text-xs py-2 font-medium text-gray-500 dark:text-gray-400" data-tab="dpv" onclick="switchTab('dpv')">DPV</button>
+        <button class="tab-btn flex-1 text-xs py-2 font-medium text-gray-500 dark:text-gray-400" data-tab="diag" onclick="switchTab('diag')">Diag</button>
+      </div>
+
+      <!-- ---- CV form ---- -->
+      <div id="tab-cv" class="px-3 py-2 space-y-2 flex-shrink-0">
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Vstart (V)</span>
+            <input id="cv-vstart" type="number" step="0.1" value="-1.0"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Vstop (V)</span>
+            <input id="cv-vstop" type="number" step="0.1" value="1.0"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Cycles</span>
+            <input id="cv-cycles" type="number" step="1" min="1" value="1"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Rate (ms/step)</span>
+            <input id="cv-rate" type="number" step="1" min="1" value="30"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+        </div>
+      </div>
+
+      <!-- ---- DPV form ---- -->
+      <div id="tab-dpv" class="px-3 py-2 space-y-2 flex-shrink-0 hidden">
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Vstart (V)</span>
+            <input id="dpv-vstart" type="number" step="0.1" value="-1.0"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Vstop (V)</span>
+            <input id="dpv-vstop" type="number" step="0.1" value="1.0"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Veq (V)</span>
+            <input id="dpv-veq" type="number" step="0.1" value="-1.0"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">teq (s)</span>
+            <input id="dpv-teq" type="number" step="1" min="0" value="5"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">StepE (mV)</span>
+            <input id="dpv-stepe" type="number" step="1" min="1" value="15"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">PulseAmp (mV)</span>
+            <input id="dpv-pulse" type="number" step="1" min="1" value="90"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Period (ms)</span>
+            <input id="dpv-period" type="number" step="1" min="1" value="100"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <label class="flex flex-col gap-0.5">
+            <span class="text-gray-500 dark:text-gray-400">Width (ms)</span>
+            <input id="dpv-width" type="number" step="1" min="1" value="25"
+                   class="border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+        </div>
+      </div>
+
+      <!-- ---- Diagnostics form ---- -->
+      <div id="tab-diag" class="px-3 py-2 space-y-3 flex-shrink-0 hidden text-xs">
+        <!-- L command -->
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 dark:text-gray-400 w-4 font-mono font-bold">L</span>
+          <label class="text-gray-500 dark:text-gray-400 flex-shrink-0">step:</label>
+          <input id="lin-step" type="number" value="5" min="1" max="64"
+                 class="w-14 border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          <button id="btn-lin" onclick="runDiagnostic('L')"
+                  class="flex-1 px-2 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors">
+            Run
+          </button>
+        </div>
+        <!-- T command -->
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 dark:text-gray-400 w-4 font-mono font-bold">T</span>
+          <input id="step-params" type="text" value="512,574,64" placeholder="dacB,dacA,n"
+                 class="flex-1 border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono">
+          <button id="btn-step" onclick="runDiagnostic('T')"
+                  class="px-2 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors">
+            Run
+          </button>
+        </div>
+        <!-- Q command -->
+        <div class="flex items-center gap-2">
+          <span class="text-gray-500 dark:text-gray-400 w-4 font-mono font-bold">Q</span>
+          <label class="text-gray-500 dark:text-gray-400 flex-shrink-0">dac:</label>
+          <input id="q-dac" type="number" value="512" min="0" max="1023"
+                 class="w-16 border dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          <button id="btn-query" onclick="runDiagnostic('Q')"
+                  class="flex-1 px-2 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white font-medium transition-colors">
+            Run
+          </button>
+        </div>
+        <p class="text-gray-400 dark:text-gray-500 text-xs leading-tight">
+          Q: Run twice at different DAC values — the channel that changes carries Vin.
+        </p>
+      </div>
+
+      <!-- ---- Preset selector ---- -->
+      <div class="px-3 py-2 border-t border-gray-100 dark:border-gray-700 flex-shrink-0">
+        <select id="preset-select" onchange="applyPreset(this.value)"
+                class="w-full text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1
+                       bg-white dark:bg-gray-700 focus:outline-none">
+          <option value="">— Load preset —</option>
+          <option value="cv_ferricyanide">Ferricyanide CV</option>
+          <option value="dpv_ferricyanide">Ferricyanide DPV</option>
+          <option value="dpv_heavy_metals">Heavy Metals DPV</option>
+        </select>
+      </div>
+
+      <!-- ---- X-axis toggle (voltammogram only) ---- -->
+      <div id="xaxis-row"
+           class="px-3 py-2 border-t border-gray-100 dark:border-gray-700 flex-shrink-0 flex gap-2 text-xs">
+        <span class="text-gray-500 dark:text-gray-400 text-xs self-center flex-shrink-0">X axis:</span>
+        <button id="xbtn-voltage" onclick="setXAxisMode('voltage')"
+                class="flex-1 py-1 rounded bg-blue-600 text-white text-xs font-medium">Commanded V</button>
+        <button id="xbtn-re" onclick="setXAxisMode('re')"
+                class="flex-1 py-1 rounded bg-gray-200 dark:bg-gray-700 text-xs hover:bg-gray-300 dark:hover:bg-gray-600">Measured RE</button>
+      </div>
+
+      <!-- ---- Run / Stop ---- -->
+      <div class="px-3 py-2 flex gap-2 flex-shrink-0 border-t border-gray-100 dark:border-gray-700">
+        <button id="btn-run" onclick="startScan()"
+                class="flex-1 py-1.5 rounded font-semibold text-sm
+                       bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+          ▶ Run
+        </button>
+        <button id="btn-stop" onclick="stopScan()" disabled
+                class="flex-1 py-1.5 rounded font-semibold text-sm
+                       bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+          ⏹ Stop
+        </button>
+      </div>
+
+      <!-- ---- Ghost/overlay section ---- -->
+      <div id="ghost-section" class="px-3 py-2 border-t border-gray-100 dark:border-gray-700 flex-shrink-0 hidden">
+        <button onclick="saveGhost()"
+                class="w-full text-xs py-1.5 rounded bg-gray-500 hover:bg-gray-600 text-white font-medium transition-colors">
+          💾 Save as ghost trace
+        </button>
+        <button id="btn-clear-ghost" onclick="clearGhost()"
+                class="w-full text-xs py-1 mt-1 rounded text-gray-500 dark:text-gray-400 hover:text-red-500 hidden">
+          ✕ Clear ghost
+        </button>
+      </div>
+
+      <!-- ---- Concentration estimate ---- -->
+      <details class="px-3 py-2 border-t border-gray-100 dark:border-gray-700 flex-shrink-0">
+        <summary class="text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none">
+          Concentration estimate
+        </summary>
+        <div class="mt-2 space-y-1">
+          <label class="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2">
+            Slope (µA/µM):
+            <input id="slope-input" type="number" step="0.01" placeholder="e.g. 1.35"
+                   oninput="updateConcentration()"
+                   class="w-20 border dark:border-gray-600 rounded px-2 py-0.5 text-xs
+                          bg-white dark:bg-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          </label>
+          <div id="conc-results"
+               class="text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap leading-relaxed font-mono">
+          </div>
+        </div>
+      </details>
+
+    </aside>
+
+    <!-- ==================================================================
+         CHART AREA (right panel)
+         ================================================================== -->
+    <main class="flex-1 flex flex-col overflow-hidden bg-gray-50 dark:bg-gray-900 chart-container">
+
+      <!-- Voltammogram (default view) -->
+      <div id="view-vol" class="flex-1 flex flex-col min-h-0">
+        <div id="plot" class="flex-1 min-h-0"></div>
+        <!-- Peaks panel -->
+        <div id="peaks-panel" class="flex-shrink-0 px-3 py-2 border-t border-gray-200 dark:border-gray-700
+                                      bg-white dark:bg-gray-800 min-h-[40px] max-h-24 overflow-y-auto">
+          <span class="text-xs text-gray-400 dark:text-gray-500" id="peaks-placeholder">
+            Peaks will appear here after a DPV scan completes.
+          </span>
+        </div>
+      </div>
+
+      <!-- RE Monitor view (time series: commanded V + measured RE) -->
+      <div id="view-rem" class="flex-1 min-h-0 hidden">
+        <div id="re-plot" class="w-full h-full"></div>
+      </div>
+
+      <!-- Diagnostics view (linearity / step chart + Q table) -->
+      <div id="view-diag" class="flex-1 flex flex-col min-h-0 hidden">
+        <div id="diag-plot" class="flex-1 min-h-0"></div>
+        <div id="query-table"
+             class="flex-shrink-0 px-3 py-2 border-t border-gray-200 dark:border-gray-700
+                    bg-white dark:bg-gray-800 overflow-y-auto max-h-48 hidden">
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ======================================================================
+       BOTTOM TOOLBAR
+       ====================================================================== -->
+  <footer class="flex items-center gap-2 px-3 py-2 border-t border-gray-200 dark:border-gray-700
+                 bg-white dark:bg-gray-800 flex-shrink-0 flex-wrap">
+    <button onclick="exportCSV()"
+            class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-medium transition-colors">
+      ⬇ CSV
+    </button>
+    <button onclick="exportPNG()"
+            class="text-xs px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-medium transition-colors">
+      📷 PNG
+    </button>
+    <button onclick="document.getElementById('file-ref').click()"
+            class="text-xs px-3 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-medium transition-colors">
+      📂 Load Reference CSV
+    </button>
+    <button id="btn-clear-ref" onclick="clearReference()" class="hidden text-xs px-2 py-1 rounded bg-gray-400 hover:bg-gray-500 text-white">
+      ✕ Ref
+    </button>
+    <button onclick="clearAll()"
+            class="text-xs px-3 py-1 rounded bg-gray-500 hover:bg-gray-600 text-white font-medium transition-colors">
+      🗑 Clear
+    </button>
+    <span class="flex-1"></span>
+    <!-- Web Serial fallback link -->
+    <a href="/static/webserial.html"
+       class="text-xs text-gray-400 dark:text-gray-500 hover:text-blue-500 underline">
+      Web Serial (no-Python)
+    </a>
+    <!-- Hidden file input for CSV import -->
+    <input id="file-ref" type="file" accept=".csv,.txt" class="hidden" onchange="importReference(this)">
+  </footer>
+
+  <!-- ======================================================================
+       JAVASCRIPT
+       ====================================================================== -->
+  <script>
+  'use strict';
+
+  // Pass dev_mode flag from Flask to JS
+  const DEV_MODE = {{ 'true' if dev_mode else 'false' }};
+
+  // ---------------------------------------------------------------------------
+  // 1. Application state
+  // ---------------------------------------------------------------------------
+
+  let scanMode = 'IDLE';           // 'CV', 'DPV', 'LINEARITY', 'STEP', 'QUERY', 'IDLE'
+  let scanData  = [];              // { voltage, current, re }[] — CV / DPV
+  let linData   = [];              // { dac, voltage }[] — LINEARITY
+  let stepData  = [];              // { elapsed_us, current }[] — STEP
+  let queryResults = [];           // last 2 query_result payloads
+  let peaks     = [];              // annotated peaks from peaks_detected or local detection
+  let ghostData = null;            // saved scan snapshot for overlay
+  let refData   = null;            // imported commercial reference { voltages, currents }
+  let xAxisMode = 'voltage';       // 'voltage' | 're'
+  let currentViewMode = 'voltammogram'; // 'voltammogram' | 're_monitor' | 'diagnostics'
+  let diagSubMode = null;          // 'linearity' | 'step' — which diagnostic chart is showing
+  let isConnected = false;
+  let isScanning  = false;
+
+  // RAF streaming buffer — points pushed here and flushed once per animation frame
+  let rafBuf = [];
+
+  // ---------------------------------------------------------------------------
+  // 2. Plotly chart state (traces array kept in sync with Plotly)
+  // ---------------------------------------------------------------------------
+
+  // Voltammogram traces (indices: 0=prototype, 1=ghost, 2=reference)
+  const VOL_TRACE_PROTO = 0;
+  const VOL_TRACE_GHOST = 1;
+  const VOL_TRACE_REF   = 2;
+
+  let volTraces = [
+    {
+      name: 'Prototype', x: [], y: [], mode: 'lines', type: 'scatter',
+      line: { color: '#3b82f6', width: 1.5 },
+    },
+    {
+      name: 'Ghost', x: [], y: [], mode: 'lines', type: 'scatter',
+      line: { color: '#9ca3af', width: 1, dash: 'dash' },
+      visible: false,
+    },
+    {
+      name: 'Reference', x: [], y: [], mode: 'lines', type: 'scatter',
+      line: { color: '#f59e0b', width: 1.5 },
+      visible: false,
+    },
+  ];
+
+  // RE monitor traces (indices: 0=commanded V, 1=measured RE)
+  let reTraces = [
+    {
+      name: 'Commanded V', x: [], y: [], mode: 'lines', type: 'scatter', yaxis: 'y',
+      line: { color: '#9ca3af', width: 1.5 },
+    },
+    {
+      name: 'Measured RE', x: [], y: [], mode: 'lines', type: 'scatter', yaxis: 'y2',
+      line: { color: '#60a5fa', width: 1.5 },
+    },
+  ];
+
+  // Diagnostics trace
+  let diagTraces = [
+    {
+      name: 'Data', x: [], y: [], mode: 'lines', type: 'scatter',
+      line: { color: '#8b5cf6', width: 1.5 },
+    },
+  ];
+
+  // ---------------------------------------------------------------------------
+  // 3. Socket.IO setup
+  // ---------------------------------------------------------------------------
+
+  // Bare io() — relative URL works from both localhost:5000 and <LAN_IP>:5000
+  const socket = io();
+
+  socket.on('connect', () => {
+    showToast('Socket connected', 'info');
+  });
+
+  socket.on('disconnect', () => {
+    if (isConnected) {
+      setConnected(false);
+      showToast('WebSocket disconnected', 'error');
+    }
+  });
+
+  // Port list from server on socket connect
+  socket.on('port_list', (ports) => {
+    const sel = document.getElementById('port-select');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— Select port —</option>';
+    (ports || []).forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = opt.textContent = p;
+      if (p === prev) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  });
+
+  socket.on('port_connected', (d) => {
+    setConnected(true);
+    setStatus('connected', `Connected to ${d.port}`);
+  });
+
+  socket.on('port_disconnected', () => {
+    setConnected(false);
+    setStatus('disconnected', 'Disconnected');
+  });
+
+  // scan_started: clear live trace, switch to correct view
+  socket.on('scan_started', (d) => {
+    scanMode = d.mode;
+    scanData = []; linData = []; stepData = [];
+    rafBuf = [];
+    isScanning = true;
+    setControls(true);
+
+    if (d.mode === 'CV' || d.mode === 'DPV') {
+      clearLiveTrace();
+      if (currentViewMode !== 'voltammogram') setViewMode('voltammogram');
+    } else if (d.mode === 'LINEARITY' || d.mode === 'STEP') {
+      diagSubMode = d.mode === 'LINEARITY' ? 'linearity' : 'step';
+      clearDiagChart();
+      if (currentViewMode !== 'diagnostics') setViewMode('diagnostics');
+    } else if (d.mode === 'QUERY') {
+      if (currentViewMode !== 'diagnostics') setViewMode('diagnostics');
+    }
+
+    setStatus('scanning', `Scanning (${d.mode})…`);
+    setInfoBar('');
+    document.getElementById('ghost-section').classList.add('hidden');
+    peaks = [];
+    renderPeaksPanel();
+  });
+
+  // CV / DPV data point → RAF buffer
+  socket.on('new_datapoint', (d) => {
+    scanData.push(d);
+    rafBuf.push(d);
+    // Also update RE monitor data in real time
+    reTraces[0].x.push(scanData.length - 1);
+    reTraces[0].y.push(d.voltage);
+    reTraces[1].x.push(scanData.length - 1);
+    reTraces[1].y.push(d.re != null ? d.re : null);
+  });
+
+  // Linearity point → extend diag chart directly (low rate, RAF not needed)
+  socket.on('linearity_point', (d) => {
+    linData.push(d);
+    diagSubMode = 'linearity';
+    Plotly.extendTraces('diag-plot', { x: [[d.dac]], y: [[d.voltage]] }, [0]);
+    setInfoBar(`${linData.length} pts`);
+  });
+
+  // Step point → extend diag chart
+  socket.on('step_point', (d) => {
+    stepData.push(d);
+    diagSubMode = 'step';
+    Plotly.extendTraces('diag-plot', { x: [[d.elapsed_us]], y: [[d.current]] }, [0]);
+    setInfoBar(`${stepData.length} pts`);
+  });
+
+  // Query result → accumulate (max 2) and render table
+  socket.on('query_result', (d) => {
+    queryResults.push(d);
+    if (queryResults.length > 2) queryResults.shift();  // keep last 2
+    renderQueryTable();
+    // Show query table panel
+    const qt = document.getElementById('query-table');
+    qt.classList.remove('hidden');
+  });
+
+  // Peaks detected (from scipy backend)
+  socket.on('peaks_detected', (d) => {
+    peaks = annotateSpecies(d.peaks || []);
+    renderPeaksPanel();
+    updateConcentration();
+  });
+
+  // Scan complete
+  socket.on('scan_complete', (d) => {
+    isScanning = false;
+    setControls(false);
+    setStatus('complete', `Complete — ${d.type} (${d.points} pts)`);
+    setInfoBar(`${d.points} points`);
+
+    if (d.type === 'CV' || d.type === 'DPV') {
+      // Flush any remaining RAF buffer
+      flushRafBuf();
+      // Show ghost save button
+      if (scanData.length > 0) {
+        document.getElementById('ghost-section').classList.remove('hidden');
+      }
+    }
+    if (d.type === 'LINEARITY') {
+      updateDiagLayout('linearity');
+    } else if (d.type === 'STEP') {
+      updateDiagLayout('step');
+    }
+  });
+
+  // Scan error
+  socket.on('scan_error', (d) => {
+    isScanning = false;
+    setControls(false);
+    setStatus('error', `Error: ${d.message}`);
+    showToast(d.message, 'error');
+  });
+
+  // Informational header lines from firmware (e.g. '# stepE_actual=16.1mV')
+  socket.on('scan_info', (d) => {
+    setInfoBar(d.message);
+  });
+
+  // Reconnect resync — server has a live scan we missed part of
+  socket.on('scan_resync', (d) => {
+    const { points = [], state } = d;
+    if (!state || state === 'IDLE') return;
+
+    scanMode = state;
+    isScanning = true;
+    setControls(true);
+
+    if (state === 'CV' || state === 'DPV') {
+      scanData = points;
+      rebuildVoltammogram();
+      // Rebuild RE monitor from resync data too
+      reTraces[0].x = scanData.map((_, i) => i);
+      reTraces[0].y = scanData.map(d => d.voltage);
+      reTraces[1].x = scanData.map((_, i) => i);
+      reTraces[1].y = scanData.map(d => d.re != null ? d.re : null);
+      if (currentViewMode !== 'voltammogram') setViewMode('voltammogram');
+    } else if (state === 'LINEARITY') {
+      linData = points;
+      diagTraces[0].x = linData.map(p => p.dac);
+      diagTraces[0].y = linData.map(p => p.voltage);
+      diagSubMode = 'linearity';
+      rebuildDiagChart();
+      if (currentViewMode !== 'diagnostics') setViewMode('diagnostics');
+    } else if (state === 'STEP') {
+      stepData = points;
+      diagTraces[0].x = stepData.map(p => p.elapsed_us);
+      diagTraces[0].y = stepData.map(p => p.current);
+      diagSubMode = 'step';
+      rebuildDiagChart();
+      if (currentViewMode !== 'diagnostics') setViewMode('diagnostics');
+    }
+
+    setStatus('scanning', `Resynced — ${state} (${points.length} pts)`);
+    setInfoBar(`${points.length} pts (resynced)`);
+  });
+
+  // ---------------------------------------------------------------------------
+  // 4. RAF streaming loop
+  // ---------------------------------------------------------------------------
+
+  function flushRafBuf() {
+    if (rafBuf.length === 0) return;
+    const batch = rafBuf.splice(0);
+    const xs = batch.map(d => xAxisMode === 're' && d.re != null ? d.re : d.voltage);
+    const ys = batch.map(d => d.current);
+    // Update in-memory trace
+    volTraces[VOL_TRACE_PROTO].x.push(...xs);
+    volTraces[VOL_TRACE_PROTO].y.push(...ys);
+    // Extend the live Plotly chart (fast, no full redraw)
+    if (currentViewMode === 'voltammogram') {
+      Plotly.extendTraces('plot', { x: [xs], y: [ys] }, [VOL_TRACE_PROTO]);
+    }
+    // Update RE monitor if that view is active
+    if (currentViewMode === 're_monitor') {
+      rebuildREMonitor();
+    }
+    setInfoBar(`${scanData.length} pts`);
+  }
+
+  function rafLoop() {
+    flushRafBuf();
+    requestAnimationFrame(rafLoop);
+  }
+  requestAnimationFrame(rafLoop);
+
+  // ---------------------------------------------------------------------------
+  // 5. Chart initialization
+  // ---------------------------------------------------------------------------
+
+  function isDark() {
+    return document.documentElement.classList.contains('dark');
+  }
+
+  function getPlotlyTheme() {
+    return {
+      template: isDark() ? 'plotly_dark' : 'plotly_white',
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { color: isDark() ? '#e5e7eb' : '#374151', size: 11 },
+    };
+  }
+
+  function makeVolLayout(title = '') {
+    const theme = getPlotlyTheme();
+    const xLabel = xAxisMode === 're' ? 'Measured RE (V)' : 'Voltage (V)';
+    return Object.assign({
+      xaxis: { title: xLabel, gridcolor: isDark() ? '#374151' : '#e5e7eb', zeroline: false },
+      yaxis: { title: 'Current (µA)', gridcolor: isDark() ? '#374151' : '#e5e7eb', zeroline: false },
+      margin: { l: 55, r: 20, t: title ? 35 : 20, b: 45 },
+      showlegend: true,
+      legend: { x: 0.01, y: 0.99, xanchor: 'left', yanchor: 'top', font: { size: 10 } },
+      hovermode: 'x unified',
+      title: title ? { text: title, font: { size: 13 } } : undefined,
+    }, theme);
+  }
+
+  function makeREMonitorLayout() {
+    const theme = getPlotlyTheme();
+    return Object.assign({
+      xaxis: { title: 'Sample index', gridcolor: isDark() ? '#374151' : '#e5e7eb', zeroline: false },
+      yaxis: {
+        title: 'Commanded V (V)', side: 'left',
+        gridcolor: isDark() ? '#374151' : '#e5e7eb', zeroline: false,
+        color: '#9ca3af',
+      },
+      yaxis2: {
+        title: 'Measured RE (V)', side: 'right', overlaying: 'y',
+        zeroline: false, showgrid: false, color: '#60a5fa',
+      },
+      margin: { l: 60, r: 65, t: 30, b: 45 },
+      showlegend: true,
+      legend: { x: 0.01, y: 0.99, xanchor: 'left', yanchor: 'top', font: { size: 10 } },
+    }, theme);
+  }
+
+  function makeDiagLayout() {
+    const theme = getPlotlyTheme();
+    const isLin = diagSubMode === 'linearity';
+    return Object.assign({
+      xaxis: {
+        title: isLin ? 'DAC count (0–1023)' : 'Elapsed (µs)',
+        gridcolor: isDark() ? '#374151' : '#e5e7eb', zeroline: false,
+      },
+      yaxis: {
+        title: isLin ? 'Measured voltage (V)' : 'Current (µA)',
+        gridcolor: isDark() ? '#374151' : '#e5e7eb', zeroline: false,
+      },
+      margin: { l: 60, r: 20, t: 30, b: 45 },
+      showlegend: false,
+    }, theme);
+  }
+
+  const PLOTLY_CONFIG = {
+    responsive: true,
+    displayModeBar: true,
+    modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+    toImageButtonOptions: { format: 'png', width: 1200, height: 700, scale: 2 },
+  };
+
+  function initCharts() {
+    Plotly.newPlot('plot', volTraces, makeVolLayout(), PLOTLY_CONFIG);
+    Plotly.newPlot('re-plot', reTraces, makeREMonitorLayout(), PLOTLY_CONFIG);
+    Plotly.newPlot('diag-plot', diagTraces, makeDiagLayout(), PLOTLY_CONFIG);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. Chart rebuild / update functions
+  // ---------------------------------------------------------------------------
+
+  function clearLiveTrace() {
+    volTraces[VOL_TRACE_PROTO].x = [];
+    volTraces[VOL_TRACE_PROTO].y = [];
+    reTraces[0].x = []; reTraces[0].y = [];
+    reTraces[1].x = []; reTraces[1].y = [];
+    Plotly.react('plot', volTraces, makeVolLayout());
+    if (currentViewMode === 're_monitor') {
+      Plotly.react('re-plot', reTraces, makeREMonitorLayout());
+    }
+  }
+
+  /** Rebuild voltammogram from scanData (used on x-axis toggle or scan_resync). */
+  function rebuildVoltammogram() {
+    rafBuf = [];  // points already in scanData — discard to avoid duplicate appends next frame
+    const xs = scanData.map(d => xAxisMode === 're' && d.re != null ? d.re : d.voltage);
+    const ys = scanData.map(d => d.current);
+    volTraces[VOL_TRACE_PROTO].x = xs;
+    volTraces[VOL_TRACE_PROTO].y = ys;
+    Plotly.react('plot', volTraces, makeVolLayout());
+  }
+
+  /** Rebuild RE monitor from reTraces (time series). */
+  function rebuildREMonitor() {
+    Plotly.react('re-plot', reTraces, makeREMonitorLayout());
+  }
+
+  function clearDiagChart() {
+    diagTraces[0].x = [];
+    diagTraces[0].y = [];
+    Plotly.react('diag-plot', diagTraces, makeDiagLayout());
+  }
+
+  function rebuildDiagChart() {
+    Plotly.react('diag-plot', diagTraces, makeDiagLayout());
+  }
+
+  function updateDiagLayout(type) {
+    diagSubMode = type;
+    Plotly.react('diag-plot', diagTraces, makeDiagLayout());
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. View mode switching
+  // ---------------------------------------------------------------------------
+
+  function setViewMode(mode) {
+    currentViewMode = mode;
+
+    // Show/hide view panels
+    document.getElementById('view-vol').classList.toggle('hidden', mode !== 'voltammogram');
+    document.getElementById('view-rem').classList.toggle('hidden', mode !== 're_monitor');
+    document.getElementById('view-diag').classList.toggle('hidden', mode !== 'diagnostics');
+
+    // Update navbar button styles
+    document.querySelectorAll('.view-btn').forEach(b => {
+      const active = b.id === `view-${mode}`;
+      b.className = b.className.replace(/bg-blue-600|bg-gray-200|dark:bg-gray-700/g, '').trim();
+      if (active) {
+        b.classList.add('bg-blue-600', 'text-white');
+        b.classList.remove('bg-gray-200', 'dark:bg-gray-700');
+      } else {
+        b.classList.add('bg-gray-200', 'dark:bg-gray-700');
+        b.classList.remove('bg-blue-600', 'text-white');
+      }
+    });
+
+    // Show/hide x-axis toggle (only relevant for voltammogram)
+    document.getElementById('xaxis-row').classList.toggle('hidden', mode !== 'voltammogram');
+
+    // Force Plotly resize on reveal (hidden elements have 0 dimensions)
+    if (mode === 'voltammogram') {
+      Plotly.Plots.resize(document.getElementById('plot'));
+    } else if (mode === 're_monitor') {
+      Plotly.react('re-plot', reTraces, makeREMonitorLayout());
+      Plotly.Plots.resize(document.getElementById('re-plot'));
+    } else if (mode === 'diagnostics') {
+      Plotly.Plots.resize(document.getElementById('diag-plot'));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8. X-axis toggle (commanded V ↔ measured RE)
+  // ---------------------------------------------------------------------------
+
+  function setXAxisMode(mode) {
+    xAxisMode = mode;
+    // Update button styles
+    document.getElementById('xbtn-voltage').className =
+      `flex-1 py-1 rounded text-xs font-medium ${mode === 'voltage' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'}`;
+    document.getElementById('xbtn-re').className =
+      `flex-1 py-1 rounded text-xs font-medium ${mode === 're' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'}`;
+    // Rebuild chart from buffer with new x-axis
+    if (scanData.length > 0) rebuildVoltammogram();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 9. Form command builders
+  // ---------------------------------------------------------------------------
+
+  function buildCVCommand() {
+    const vs = parseFloat(document.getElementById('cv-vstart').value);
+    const ve = parseFloat(document.getElementById('cv-vstop').value);
+    const cy = parseInt(document.getElementById('cv-cycles').value, 10);
+    const rt = parseInt(document.getElementById('cv-rate').value, 10);
+    return `C ${vs},${ve},${cy},${rt}`;
+  }
+
+  function buildDPVCommand() {
+    const vs  = parseFloat(document.getElementById('dpv-vstart').value);
+    const ve  = parseFloat(document.getElementById('dpv-vstop').value);
+    const veq = parseFloat(document.getElementById('dpv-veq').value);
+    const teq = parseFloat(document.getElementById('dpv-teq').value);
+    const se  = parseFloat(document.getElementById('dpv-stepe').value);
+    const pa  = parseFloat(document.getElementById('dpv-pulse').value);
+    const pp  = parseFloat(document.getElementById('dpv-period').value);
+    const pw  = parseFloat(document.getElementById('dpv-width').value);
+    return `D ${vs},${ve},${veq},${teq},${se},${pa},${pp},${pw}`;
+  }
+
+  function activeTab() {
+    return document.querySelector('.tab-btn.active')?.dataset.tab || 'cv';
+  }
+
+  // ---------------------------------------------------------------------------
+  // 10. Preset application
+  // ---------------------------------------------------------------------------
+
+  function applyPreset(key) {
+    if (!key || !PRESETS[key]) return;
+    const p = PRESETS[key];
+    switchTab(p.mode === 'dpv' ? 'dpv' : 'cv');
+    if (p.mode === 'cv' && p.cv) {
+      for (const [k, v] of Object.entries(p.cv)) {
+        const el = document.getElementById(`cv-${k}`);
+        if (el) el.value = v;
+      }
+    }
+    if (p.mode === 'dpv' && p.dpv) {
+      for (const [k, v] of Object.entries(p.dpv)) {
+        const el = document.getElementById(`dpv-${k}`);
+        if (el) el.value = v;
+      }
+    }
+    // Reset select to blank so it can be re-selected
+    document.getElementById('preset-select').value = '';
+  }
+
+  // ---------------------------------------------------------------------------
+  // 11. Connection controls
+  // ---------------------------------------------------------------------------
+
+  let _connectBtn = document.getElementById('btn-connect');
+
+  function handleConnect() {
+    if (!isConnected) {
+      const port = document.getElementById('port-select').value;
+      socket.emit('connect_port', { port, baud: 115200 });
+    } else {
+      socket.emit('disconnect_port');
+    }
+  }
+  _connectBtn.addEventListener('click', handleConnect);
+
+  function setConnected(val) {
+    isConnected = val;
+    _connectBtn.textContent = val ? 'Disconnect' : 'Connect';
+    _connectBtn.className = _connectBtn.className
+      .replace(/bg-emerald-\d+|bg-red-\d+|hover:bg-emerald-\d+|hover:bg-red-\d+/g, '').trim();
+    if (val) {
+      _connectBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+    } else {
+      _connectBtn.classList.add('bg-emerald-600', 'hover:bg-emerald-700');
+    }
+    if (!val) isScanning = false;
+    setControls(isScanning);
+    if (!val) setStatus('disconnected', 'Disconnected');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 12. Scan start / stop
+  // ---------------------------------------------------------------------------
+
+  function startScan() {
+    if (!isConnected) { showToast('Not connected', 'error'); return; }
+    if (isScanning)   { showToast('Scan already running', 'info'); return; }
+
+    const tab = activeTab();
+    let cmd;
+    if (tab === 'cv')  cmd = buildCVCommand();
+    else               cmd = buildDPVCommand();
+
+    socket.emit('start_scan', { command: cmd });
+  }
+
+  function stopScan() {
+    socket.emit('abort_scan');
+  }
+
+  function runDiagnostic(type) {
+    if (!isConnected) { showToast('Not connected', 'error'); return; }
+    let cmd;
+    if (type === 'L') {
+      cmd = `L ${document.getElementById('lin-step').value.trim()}`;
+    } else if (type === 'T') {
+      cmd = `T ${document.getElementById('step-params').value.trim()}`;
+    } else if (type === 'Q') {
+      cmd = `Q ${document.getElementById('q-dac').value.trim()}`;
+    }
+    socket.emit('start_scan', { command: cmd });
+  }
+
+  function setControls(scanning) {
+    document.getElementById('btn-run').disabled  = !isConnected || scanning;
+    document.getElementById('btn-stop').disabled = !scanning;
+    document.getElementById('btn-lin').disabled  = !isConnected || scanning;
+    document.getElementById('btn-step').disabled = !isConnected || scanning;
+    document.getElementById('btn-query').disabled = !isConnected || scanning;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 13. Status bar
+  // ---------------------------------------------------------------------------
+
+  const STATUS_CLASSES = {
+    disconnected: 'dot-disconnected',
+    connected:    'dot-connected',
+    scanning:     'dot-scanning',
+    complete:     'dot-complete',
+    error:        'dot-error',
+  };
+
+  function setStatus(type, text) {
+    const dot  = document.getElementById('status-dot');
+    const span = document.getElementById('status-text');
+    dot.className = `status-dot ${STATUS_CLASSES[type] || 'dot-disconnected'}`;
+    span.textContent = text;
+  }
+
+  function setInfoBar(text) {
+    document.getElementById('info-bar').textContent = text;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 14. Toast notification
+  // ---------------------------------------------------------------------------
+
+  let _toastTimer = null;
+
+  function showToast(message, type = 'error') {
+    const el = document.getElementById('toast');
+    el.textContent = message;
+    // Color by type
+    el.className = el.className
+      .replace(/bg-\S+/g, '').trim() + ' ';
+    if (type === 'error') {
+      el.classList.add('bg-red-600', 'text-white');
+    } else if (type === 'info') {
+      el.classList.add('bg-gray-700', 'text-white');
+    } else {
+      el.classList.add('bg-emerald-600', 'text-white');
+    }
+    el.classList.add('show');
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 15. Tab switching
+  // ---------------------------------------------------------------------------
+
+  function switchTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => {
+      const on = b.dataset.tab === tab;
+      b.classList.toggle('active', on);
+      b.classList.toggle('text-gray-500', !on);
+      b.classList.toggle('dark:text-gray-400', !on);
+    });
+    document.getElementById('tab-cv').classList.toggle('hidden', tab !== 'cv');
+    document.getElementById('tab-dpv').classList.toggle('hidden', tab !== 'dpv');
+    document.getElementById('tab-diag').classList.toggle('hidden', tab !== 'diag');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 16. Peaks panel
+  // ---------------------------------------------------------------------------
+
+  function renderPeaksPanel() {
+    const panel = document.getElementById('peaks-panel');
+    const ph    = document.getElementById('peaks-placeholder');
+    if (!peaks || peaks.length === 0) {
+      ph.classList.remove('hidden');
+      // Remove any previous chips
+      panel.querySelectorAll('.peak-chip').forEach(e => e.remove());
+      return;
+    }
+    ph.classList.add('hidden');
+    panel.querySelectorAll('.peak-chip').forEach(e => e.remove());
+    for (const pk of peaks) {
+      const chip = document.createElement('span');
+      chip.className = 'peak-chip';
+      chip.style.background = (pk.color || '#94a3b8') + '33';
+      chip.style.color = pk.color || '#94a3b8';
+      chip.style.border = `1px solid ${pk.color || '#94a3b8'}`;
+      const label = pk.species ? `${pk.voltage.toFixed(3)} V — ${pk.current.toFixed(3)} µA (${pk.species} ±100mV hint)` :
+                                 `${pk.voltage.toFixed(3)} V — ${pk.current.toFixed(3)} µA`;
+      chip.textContent = label;
+      panel.appendChild(chip);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 17. Query table
+  // ---------------------------------------------------------------------------
+
+  function renderQueryTable() {
+    const container = document.getElementById('query-table');
+    if (queryResults.length === 0) {
+      container.innerHTML = '<p class="text-xs text-gray-400">No query results yet.</p>';
+      return;
+    }
+
+    const CH_NAMES = ['AIN0','AIN1','AIN2','AIN3','DIFF_0_1','DIFF_0_3','DIFF_1_3','DIFF_2_3'];
+    const hasPair = queryResults.length === 2;
+
+    let html = `<table class="w-full text-xs font-mono border-collapse">
+      <thead><tr>
+        <th class="text-left p-1 border-b border-gray-600 text-gray-400">Channel</th>`;
+    queryResults.forEach(r => {
+      html += `<th class="text-right p-1 border-b border-gray-600 text-gray-400">Q dac=${r.dac}</th>`;
+    });
+    if (hasPair) html += `<th class="text-right p-1 border-b border-gray-600 text-gray-400">Δ</th>`;
+    html += `</tr></thead><tbody>`;
+
+    const changedChips = [];
+    for (const ch of CH_NAMES) {
+      const vals = queryResults.map(r => r.channels ? r.channels[ch] : null);
+      const changed = hasPair && vals[0] != null && vals[1] != null &&
+                      Math.abs(vals[0] - vals[1]) > 0.05;
+      if (changed) changedChips.push(ch);
+      const rowBg = changed ? 'bg-yellow-900/20 dark:bg-yellow-900/30' : '';
+      html += `<tr class="${rowBg}">
+        <td class="p-1 border-b border-gray-700 text-gray-400">${ch}</td>`;
+      vals.forEach(v => {
+        html += `<td class="text-right p-1 border-b border-gray-700">${v != null ? v.toFixed(4)+' V' : '—'}</td>`;
+      });
+      if (hasPair) {
+        const delta = vals[0] != null && vals[1] != null ? vals[1] - vals[0] : null;
+        const dCls  = changed ? 'text-yellow-400 font-bold' : 'text-gray-500';
+        html += `<td class="text-right p-1 border-b border-gray-700 ${dCls}">${delta != null ? (delta >= 0 ? '+' : '') + delta.toFixed(4) : '—'}</td>`;
+      }
+      html += `</tr>`;
+    }
+    html += `</tbody></table>`;
+
+    // Summary
+    html += `<div class="mt-2 text-xs text-gray-400 flex gap-3 flex-wrap">`;
+    queryResults.forEach(r => {
+      html += `<span>Q dac=${r.dac}: Vin_theoretical = ${r.vin_theoretical != null ? r.vin_theoretical.toFixed(4)+' V' : '—'}</span>`;
+    });
+    if (changedChips.length > 0) {
+      html += `<span class="text-yellow-400 font-semibold">Vin likely on: ${changedChips.join(', ')}</span>`;
+    }
+    html += `</div>`;
+
+    container.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 18. Ghost / overlay
+  // ---------------------------------------------------------------------------
+
+  function saveGhost() {
+    if (scanData.length === 0) return;
+    ghostData = [...scanData];
+    const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const xs = ghostData.map(d => xAxisMode === 're' && d.re != null ? d.re : d.voltage);
+    const ys = ghostData.map(d => d.current);
+    volTraces[VOL_TRACE_GHOST].x = xs;
+    volTraces[VOL_TRACE_GHOST].y = ys;
+    volTraces[VOL_TRACE_GHOST].name = `Ghost (${ts})`;
+    volTraces[VOL_TRACE_GHOST].visible = true;
+    Plotly.react('plot', volTraces, makeVolLayout());
+    document.getElementById('btn-clear-ghost').classList.remove('hidden');
+    showToast('Ghost trace saved', 'success');
+  }
+
+  function clearGhost() {
+    ghostData = null;
+    volTraces[VOL_TRACE_GHOST].x = [];
+    volTraces[VOL_TRACE_GHOST].y = [];
+    volTraces[VOL_TRACE_GHOST].visible = false;
+    Plotly.react('plot', volTraces, makeVolLayout());
+    document.getElementById('btn-clear-ghost').classList.add('hidden');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 19. CSV import (reference trace)
+  // ---------------------------------------------------------------------------
+
+  function importReference(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const result = parseImportCSV(e.target.result);
+      if (!result) {
+        showToast('Could not parse CSV — no numeric rows found', 'error');
+        return;
+      }
+      refData = result;
+      volTraces[VOL_TRACE_REF].x = result.voltages;
+      volTraces[VOL_TRACE_REF].y = result.currents;
+      volTraces[VOL_TRACE_REF].name = `Reference: ${file.name}`;
+      volTraces[VOL_TRACE_REF].visible = true;
+      Plotly.react('plot', volTraces, makeVolLayout());
+      document.getElementById('btn-clear-ref').classList.remove('hidden');
+      showToast(`Reference loaded: ${result.voltages.length} pts from ${file.name}`, 'success');
+      if (currentViewMode !== 'voltammogram') setViewMode('voltammogram');
+    };
+    reader.readAsText(file);
+    input.value = '';  // allow re-loading the same file
+  }
+
+  function clearReference() {
+    refData = null;
+    volTraces[VOL_TRACE_REF].x = [];
+    volTraces[VOL_TRACE_REF].y = [];
+    volTraces[VOL_TRACE_REF].visible = false;
+    Plotly.react('plot', volTraces, makeVolLayout());
+    document.getElementById('btn-clear-ref').classList.add('hidden');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 20. Export (CSV + PNG)
+  // ---------------------------------------------------------------------------
+
+  function exportCSV() {
+    const tab = activeTab();
+    if (tab === 'diag') {
+      if (diagSubMode === 'linearity' && linData.length > 0) {
+        downloadBlob(buildLinearityCSV(linData), 'linearity.csv');
+      } else if (diagSubMode === 'step' && stepData.length > 0) {
+        downloadBlob(buildStepCSV(stepData), 'step_response.csv');
+      } else {
+        showToast('No diagnostic data to export', 'info');
+      }
+    } else if (scanData.length > 0) {
+      const ts = new Date().toISOString().slice(0, 16).replace('T', '_').replace(/:/g, '');
+      const mode = scanMode === 'CV' ? 'cv' : 'dpv';
+      downloadBlob(buildExportCSV(scanData), `${mode}_${ts}.csv`);
+    } else {
+      showToast('No scan data to export', 'info');
+    }
+  }
+
+  function exportPNG() {
+    const divId = currentViewMode === 'voltammogram' ? 'plot'
+                : currentViewMode === 're_monitor'   ? 're-plot'
+                :                                      'diag-plot';
+    Plotly.downloadImage(document.getElementById(divId), {
+      format: 'png', width: 1200, height: 700, scale: 2,
+      filename: `potentiostat_${currentViewMode}_${Date.now()}`,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 21. Clear all
+  // ---------------------------------------------------------------------------
+
+  function clearAll() {
+    scanData = []; linData = []; stepData = [];
+    rafBuf = []; peaks = [];
+    reTraces[0].x = []; reTraces[0].y = [];
+    reTraces[1].x = []; reTraces[1].y = [];
+    clearLiveTrace();
+    clearDiagChart();
+    renderPeaksPanel();
+    document.getElementById('conc-results').textContent = '';
+    document.getElementById('ghost-section').classList.add('hidden');
+    document.getElementById('info-bar').textContent = '';
+    document.getElementById('query-table').classList.add('hidden');
+    queryResults = [];
+  }
+
+  // ---------------------------------------------------------------------------
+  // 22. Concentration estimate
+  // ---------------------------------------------------------------------------
+
+  function updateConcentration() {
+    const slope = parseFloat(document.getElementById('slope-input').value);
+    const out   = document.getElementById('conc-results');
+    if (isNaN(slope) || slope === 0 || peaks.length === 0) {
+      out.textContent = '';
+      return;
+    }
+    const lines = peaks.map(pk => {
+      const c     = (pk.current / slope).toFixed(2);
+      const label = pk.species ? ` (${pk.species})` : '';
+      return `${pk.voltage.toFixed(3)} V → ≈${c} µM (m=${slope} µA/µM${label})`;
+    });
+    out.textContent = lines.join('\n');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 23. Dark/light theme
+  // ---------------------------------------------------------------------------
+
+  function applyTheme(dark) {
+    document.documentElement.classList.toggle('dark', dark);
+    document.getElementById('theme-label').textContent = dark ? '☀ Light' : '🌙 Dark';
+    localStorage.setItem('theme', dark ? 'dark' : 'light');
+    // Rebuild charts with new template
+    if (currentViewMode === 'voltammogram') {
+      Plotly.react('plot', volTraces, makeVolLayout());
+    } else if (currentViewMode === 're_monitor') {
+      Plotly.react('re-plot', reTraces, makeREMonitorLayout());
+    } else {
+      Plotly.react('diag-plot', diagTraces, makeDiagLayout());
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(!document.documentElement.classList.contains('dark'));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 24. Init
+  // ---------------------------------------------------------------------------
+
+  (function init() {
+    // Restore theme from localStorage or system preference
+    const savedTheme = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(savedTheme === 'dark' || (!savedTheme && prefersDark));
+
+    // Initial control state (nothing connected)
+    setControls(false);
+    document.getElementById('btn-run').disabled = true;
+    document.getElementById('btn-stop').disabled = true;
+    document.getElementById('btn-lin').disabled = true;
+    document.getElementById('btn-step').disabled = true;
+    document.getElementById('btn-query').disabled = true;
+
+    // Initialize all three Plotly charts
+    initCharts();
+
+    // Default to voltammogram view
+    setViewMode('voltammogram');
+
+    if (DEV_MODE) {
+      console.log('[DEV] Potentiostat UI — dev mode. Backend:', window.location.origin);
+    }
+  })();
+  </script>
 </body>
 </html>

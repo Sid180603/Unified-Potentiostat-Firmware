@@ -284,7 +284,7 @@ class MockPotentiostat:
         vin_theoretical = (dac - 512) / 312.0
         ain_vin = max(0.0, vin_theoretical)   # single-ended clips negatives to 0
 
-        # Header line (START marker — note: 'Q dac=...', NOT 'Q*')
+        self.ser.write(b"Q*\n")
         self.ser.write(f"Q dac={dac} Vin_theoretical={vin_theoretical:.4f}\n".encode())
         self.log(f"Channel query: dac={dac}")
 

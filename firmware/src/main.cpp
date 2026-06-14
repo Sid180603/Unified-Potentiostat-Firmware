@@ -147,6 +147,48 @@ void runStep(int dacBefore, int dacAfter, int nSamples) {
     Serial.println("T#");
 }
 
+// Q — channel-scan diagnostic. Sets the DAC to a fixed value, then reports ALL
+// ADS1115 single-ended channels (AIN0-3) plus the four differential pairs.
+// Run twice at separated DAC values (e.g. "Q 900" then "Q 100") and look for
+// which channel CHANGES between them — that channel carries Vin. Differential
+// pairs reveal Vin even when single-ended clips a negative swing to 0.
+// Output: "Q dac=... Vin_theoretical=..." ... per-channel lines ... "Q#".
+// Restores AIN0 continuous mode on exit so normal CV/DPV keeps working.
+void runChannelQuery(int dacVal) {
+    setDAC(dacVal);
+    delay(10);  // generous settle for DAC + level shifter
+    const float LSB = 4.096f / 32768.0f;
+
+    Serial.print("Q dac=");
+    Serial.print(dacVal);
+    Serial.print(" Vin_theoretical=");
+    Serial.println(dacToVolt(dacVal), 4);
+
+    // Single-ended channels (0 to +4.096V, clips negatives to 0)
+    for (int ch = 0; ch < 4; ch++) {
+        int16_t raw = ads.readADC_SingleEnded(ch);
+        Serial.print("AIN");
+        Serial.print(ch);
+        Serial.print('=');
+        Serial.println(raw * LSB, 5);
+    }
+
+    // Differential pairs (bipolar +/-4.096V — can report negative Vin)
+    Serial.print("DIFF_0_1=");
+    Serial.println(ads.readADC_Differential_0_1() * LSB, 5);
+    Serial.print("DIFF_0_3=");
+    Serial.println(ads.readADC_Differential_0_3() * LSB, 5);
+    Serial.print("DIFF_1_3=");
+    Serial.println(ads.readADC_Differential_1_3() * LSB, 5);
+    Serial.print("DIFF_2_3=");
+    Serial.println(ads.readADC_Differential_2_3() * LSB, 5);
+
+    setDAC(DAC_MID);
+    // Restore continuous-mode current measurement on AIN0
+    ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, true);
+    Serial.println("Q#");
+}
+
 // --- Setup & Loop ---
 
 void setup() {
@@ -222,6 +264,14 @@ void loop() {
                 dacAfter  = constrain(dacAfter, 0, DAC_MAX);
                 nSamples  = constrain(nSamples, 1, 2000);
                 runStep(dacBefore, dacAfter, nSamples);
+                break;
+            }
+            case 'Q': case 'q': {
+                // Q [dac] — channel-scan diagnostic (AIN0-3 + diff pairs at one DAC value)
+                int dacVal = DAC_MID;
+                sscanf(line.c_str() + 1, "%d", &dacVal);
+                dacVal = constrain(dacVal, 0, DAC_MAX);
+                runChannelQuery(dacVal);
                 break;
             }
             default:

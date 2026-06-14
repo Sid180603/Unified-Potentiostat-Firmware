@@ -28,6 +28,9 @@ build/
 dist/
 *.log
 
+# Measurement data dumps
+*.csv
+
 # ─── Secrets (commit *.env.example only, not real secrets) ──
 .env
 .env.local
